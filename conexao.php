@@ -33,6 +33,15 @@ try {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
 } catch (PDOException $e) {
+    $pdo = null;
+
+    // Páginas HTML (index.php / ranking.php) definem CONEXAO_SILENCIOSA para
+    // continuar abrindo mesmo sem banco, em vez de mostrar JSON cru na tela.
+    if (defined('CONEXAO_SILENCIOSA') && CONEXAO_SILENCIOSA) {
+        return;
+    }
+
+    // Endpoints de API: respondem em JSON
     http_response_code(500);
     header('Content-Type: application/json; charset=utf-8');
 

@@ -1,6 +1,7 @@
 <?php
 /* Endpoint para salvar a pontuação do jogador no banco de dados */
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
 require_once __DIR__ . '/conexao.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -35,6 +36,9 @@ try {
         ':pontos' => $pontos,
     ]);
 
+    // id do registro recém-criado (o jogo usa para destacar a linha do jogador)
+    $novoId = (int)$pdo->lastInsertId();
+
     // Busca o TOP 10 atualizado
     $stmtRanking = $pdo->prepare("
         SELECT id, nome, pontos, DATE_FORMAT(dataRegistro, '%d/%m/%Y %H:%i') AS data
@@ -48,6 +52,7 @@ try {
     echo json_encode([
         'status'  => 'success',
         'message' => 'Pontuação registrada com sucesso!',
+        'id'      => $novoId,
         'ranking' => $ranking,
     ]);
 } catch (PDOException $e) {

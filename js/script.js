@@ -1,505 +1,690 @@
-document.addEventListener('DOMContentLoaded', () => {
+/* =========================================================
+   NUCLES JUMP — lógica do jogo
+   Depende de: index.php (IDs do HTML), css/style.css,
+               salvar_ranking.php e obter_ranking.php
+   ========================================================= */
+(function () {
+    'use strict';
 
-    // Lista de personagens disponíveis.
-    // Para adicionar outro, basta incluir um novo item aqui (e colocar as imagens em assets/).
-    const PERSONAGENS = [
-        {
-            id: 'personagem1',
-            nome: 'PERS. 1',
-            img: 'assets/personagem.gif',
-            gameOver: 'assets/game-over.jpg'
-        },
-        {
-            id: 'personagem2',
-            nome: 'PERS. 2',
-            img: 'assets/personagem2.gif',
-            gameOver: 'assets/game-over.jpg'
-        }
-    ];
+    /* ---------------------------------------------------------
+       CONFIGURAÇÃO (mantenha igual às variáveis do style.css)
+       Unidades: pixels e segundos. "y" = altura acima do chão.
+       --------------------------------------------------------- */
+    var CFG = {
+        playerX: 70,   // --player-x
+        playerW: 72,   // --player-w
+        playerH: 72,   // --player-h
+        pipeW: 64,     // --pipe-w
+        pipeH: 90,     // --pipe-h
+        moedaTam: 36,  // --moeda
 
-    // Personagem escolhido (recupera a última escolha salva)
-    const savedCharacterId = localStorage.getItem('nucles_jump_character');
-    let currentCharacter =
-        PERSONAGENS.find(p => p.id === savedCharacterId) || PERSONAGENS[0];
+        gravidade: 2600,
+        impulsoPulo: 950,   // altura máx. do pulo ≈ 173 px (cano tem 90 px)
+        bufferPulo: 0.12,   // aceita o pulo apertado logo antes de aterrissar
 
-    // Elementos do jogo
-    const personagem = document.querySelector('.personagem');
-    const pipe = document.querySelector('.pipe');
-    const gameBoard = document.getElementById('game-board');
-    const hudPlayerName = document.getElementById('hud-player-name');
-    const scoreDisplay = document.getElementById('score-display');
-    const jumpTip = document.getElementById('jump-tip');
+        velInicial: 340,    // px/s (partida ligeiramente mais suave)
+        velAceleracao: 10,  // px/s a cada segundo (aceleração gradual e equilibrada)
+        velBonusMoeda: 10,  // px/s a cada moeda coletada
+        velMaxima: 850,     // limite máximo confortável de velocidade
 
-    // Telas e modais
-    const startModal = document.getElementById('start-modal');
-    const startForm = document.getElementById('start-form');
-    const playerInput = document.getElementById('player-input');
-    const btnViewRanking = document.getElementById('btn-view-ranking');
+        pontosMoeda: 10,
+        pontosObstaculo: 5,
 
-    const gameoverModal = document.getElementById('gameover-modal');
-    const gameoverTitle = document.getElementById('gameover-title');
-    const finalScoreBox = document.getElementById('final-score-box');
-    const finalScoreValue = document.getElementById('final-score-value');
-    const saveStatusMsg = document.getElementById('save-status-msg');
-    const rankingBody = document.getElementById('ranking-body');
-    const btnRestart = document.getElementById('btn-restart');
-    const btnChangePlayer = document.getElementById('btn-change-player');
+        // Caixas de colisão (um pouco menores que as imagens, para ser justo)
+        hitPlayerLado: 16,
+        hitPlayerBaixo: 4,
+        hitPlayerCima: 8,
+        hitPipeLado: 3,
+        hitPipeTopo: 2,
+        hitMoedaMargem: 4
+    };
 
-    // Verifica se os elementos essenciais existem
-    if (!personagem || !pipe || !gameBoard || !startForm) {
-        console.error(
-            'Erro: confira os elementos personagem, pipe, game-board e start-form no HTML.'
-        );
+    var PERSONAGENS = {
+        mimi: { nome: 'Mimi' },
+        luna: { nome: 'Luna' }
+    };
+    var PERSONAGEM_PADRAO = 'mimi';
+
+    /* ---------------------------------------------------------
+       ELEMENTOS DO HTML
+       --------------------------------------------------------- */
+    function $(id) { return document.getElementById(id); }
+
+    var el = {
+        container:    $('game-container'),
+        board:        $('game-board'),
+        chao:         $('chao'),
+        personagem:   $('personagem'),
+        jumpTip:      $('jump-tip'),
+        hudNome:      $('hud-player-name'),
+        hudPontos:    $('score-display'),
+        hudMoedas:    $('coin-display'),
+
+        startModal:   $('start-modal'),
+        startForm:    $('start-form'),
+        inputNome:    $('player-input'),
+        picker:       $('character-picker'),
+        btnVerRank:   $('btn-view-ranking'),
+        statusDot:    $('status-dot'),
+        statusText:   $('status-text'),
+
+        overModal:    $('gameover-modal'),
+        overTitle:    $('gameover-title'),
+        scoreBox:     $('final-score-box'),
+        finalPontos:  $('final-score-value'),
+        finalMoedas:  $('final-coins-value'),
+        saveMsg:      $('save-status-msg'),
+        btnRetry:     $('btn-retry-save'),
+        rankBody:     $('ranking-body'),
+        btnRestart:   $('btn-restart'),
+        btnTrocar:    $('btn-change-player'),
+        btnVoltar:    $('btn-back-menu')
+    };
+
+    // Se algum ID do HTML estiver errado, avisa no console em vez de quebrar em silêncio
+    var faltando = Object.keys(el).filter(function (k) { return !el[k]; });
+    if (faltando.length) {
+        console.error('[Nucles Jump] Elementos não encontrados no HTML:', faltando.join(', '));
         return;
     }
 
-    // Pré-carrega as imagens para não piscar
-    PERSONAGENS.forEach(p => {
-        new Image().src = p.img;
-        new Image().src = p.gameOver;
-    });
+    /* ---------------------------------------------------------
+       ESTADO
+       --------------------------------------------------------- */
+    var estado = 'menu';          // 'menu' | 'jogando' | 'fim'
+    var jogador = { nome: '', personagem: PERSONAGEM_PADRAO };
+    var run = null;               // dados da partida atual
 
-    // Estado do jogo
-    let currentPlayer = '';
-    let score = 0;
-    let isPlaying = false;
-    let gameLoop = null;
-    let scoreLoop = null;
+    /* ---------------------------------------------------------
+       UTILITÁRIOS
+       --------------------------------------------------------- */
+    function aleatorio(min, max) { return min + Math.random() * (max - min); }
 
-    // Carrega o último nome utilizado
-    const savedName = localStorage.getItem('nucles_jump_player');
-
-    if (savedName && playerInput) {
-        playerInput.value = savedName;
+    function guardar(chave, valor) {
+        try { localStorage.setItem(chave, valor); } catch (e) { /* ignora */ }
+    }
+    function ler(chave) {
+        try { return localStorage.getItem(chave); } catch (e) { return null; }
     }
 
-    // Mostra as opções de personagem na tela inicial
-    const characterPicker = document.getElementById('character-picker');
+    // Usa a imagem embutida (js/imagens.js); se não existir, cai no arquivo da pasta assets/
+    function imagem(caminho) {
+        return (window.IMAGENS && window.IMAGENS[caminho]) || caminho;
+    }
 
-    function renderCharacterPicker() {
-        if (!characterPicker) return;
+    function caminhoSprite(id, quadro) {
+        return imagem('assets/personagens/' + id + '_' + quadro + '.png');
+    }
 
-        characterPicker.innerHTML = '';
+    function trocarSprite(quadro) {
+        var url = caminhoSprite(jogador.personagem, quadro);
+        if (el.personagem.getAttribute('data-quadro') !== jogador.personagem + quadro) {
+            el.personagem.src = url;
+            el.personagem.setAttribute('data-quadro', jogador.personagem + quadro);
+        }
+    }
 
-        PERSONAGENS.forEach(p => {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'character-option';
-            btn.dataset.id = p.id;
+    // Pré-carrega as imagens para não piscar nem gerar atraso na troca de quadros
+    Object.keys(PERSONAGENS).forEach(function (id) {
+        ['1', '2', 'pulo'].forEach(function (q) { new Image().src = caminhoSprite(id, q); });
+    });
+    new Image().src = imagem('assets/moeda.png');
+    new Image().src = imagem('assets/pipe.png');
 
-            if (p.id === currentCharacter.id) {
-                btn.classList.add('selected');
-            }
+    function rotuloPosicao(i) {
+        if (i === 0) return '🥇 1º';
+        if (i === 1) return '🥈 2º';
+        if (i === 2) return '🥉 3º';
+        return (i + 1) + 'º';
+    }
 
-            const img = document.createElement('img');
-            img.src = p.img;
-            img.alt = p.nome;
-            img.draggable = false;
+    /* ---------------------------------------------------------
+       RANKING / SERVIDOR
+       --------------------------------------------------------- */
+    function marcarServidor(online) {
+        el.statusDot.className = 'status-dot ' + (online ? 'online' : 'offline');
+        el.statusText.textContent = online
+            ? 'Conectado ao MySQL'
+            : 'Sem conexão com o MySQL — a pontuação não será salva';
+    }
 
-            const label = document.createElement('span');
-            label.textContent = p.nome;
+    function renderRanking(lista, destaqueId) {
+        el.rankBody.innerHTML = '';
 
-            btn.appendChild(img);
-            btn.appendChild(label);
+        if (!lista || !lista.length) {
+            var trVazio = document.createElement('tr');
+            var tdVazio = document.createElement('td');
+            tdVazio.colSpan = 3;
+            tdVazio.className = 'loading-cell';
+            tdVazio.textContent = 'Nenhuma pontuação gravada ainda. Jogue para ser o 1º!';
+            trVazio.appendChild(tdVazio);
+            el.rankBody.appendChild(trVazio);
+            return;
+        }
 
-            btn.addEventListener('click', () => selectCharacter(p.id));
+        lista.forEach(function (item, i) {
+            var tr = document.createElement('tr');
+            if (destaqueId && Number(item.id) === Number(destaqueId)) tr.className = 'destaque';
 
-            characterPicker.appendChild(btn);
+            var tdPos = document.createElement('td');
+            tdPos.className = 'ranking-pos';
+            tdPos.textContent = rotuloPosicao(i);
+
+            var tdNome = document.createElement('td');
+            var forte = document.createElement('strong');
+            forte.textContent = item.nome;          // textContent: seguro contra HTML injetado
+            tdNome.appendChild(forte);
+
+            var tdPts = document.createElement('td');
+            tdPts.textContent = Number(item.pontos) + ' pts';
+
+            tr.appendChild(tdPos);
+            tr.appendChild(tdNome);
+            tr.appendChild(tdPts);
+            el.rankBody.appendChild(tr);
         });
     }
 
-    function selectCharacter(id) {
-        const found = PERSONAGENS.find(p => p.id === id);
-        if (!found) return;
-
-        currentCharacter = found;
-        localStorage.setItem('nucles_jump_character', found.id);
-
-        // Atualiza o destaque e a prévia no tabuleiro
-        characterPicker.querySelectorAll('.character-option').forEach(btn => {
-            btn.classList.toggle('selected', btn.dataset.id === found.id);
+    function lerJson(resposta) {
+        return resposta.text().then(function (texto) {
+            try { return JSON.parse(texto); }
+            catch (e) { throw new Error('resposta inválida do servidor'); }
         });
-
-        if (!isPlaying) {
-            personagem.src = found.img;
-        }
     }
 
-    // Prepara o jogo para uma nova rodada
-    function resetElements() {
-        gameBoard.classList.remove('running', 'game-over');
-
-        personagem.classList.remove('jump');
-        personagem.src = currentCharacter.img;
-
-        // Força o navegador a recalcular o layout para as animações reiniciarem do zero
-        void gameBoard.offsetWidth;
-
-        if (jumpTip) {
-            jumpTip.style.opacity = '1';
-        }
-    }
-
-    // Inicia o jogo
-    function startGame() {
-        clearInterval(gameLoop);
-        clearInterval(scoreLoop);
-
-        isPlaying = false;
-        resetElements();
-
-        score = 0;
-        scoreDisplay.textContent = '0';
-        hudPlayerName.textContent = currentPlayer || 'Jogador';
-
-        gameoverModal.classList.remove('active');
-
-        // Tira o foco de botões para o ESPAÇO não ativar o botão clicado por último
-        if (document.activeElement && document.activeElement.blur) {
-            document.activeElement.blur();
-        }
-
-        // Inicia as animações
-        gameBoard.classList.add('running');
-        isPlaying = true;
-
-        // Soma 1 ponto a cada 100 milissegundos
-        scoreLoop = setInterval(() => {
-            if (isPlaying) {
-                score++;
-                scoreDisplay.textContent = score;
-            }
-        }, 100);
-
-        // Verifica colisões
-        gameLoop = setInterval(checkCollision, 10);
-    }
-
-    // Faz o personagem pular
-    function jump() {
-        if (!isPlaying) return;
-        if (personagem.classList.contains('jump')) return;
-
-        personagem.classList.add('jump');
-
-        if (jumpTip) {
-            jumpTip.style.opacity = '0';
-        }
-    }
-
-    // Remove a classe de pulo quando a animação termina
-    personagem.addEventListener('animationend', event => {
-        if (event.animationName === 'jump-animation') {
-            personagem.classList.remove('jump');
-        }
-    });
-
-    // Verifica colisão entre o personagem e o obstáculo
-    function checkCollision() {
-        if (!isPlaying) return;
-
-        const pipeRect = pipe.getBoundingClientRect();
-        const charRect = personagem.getBoundingClientRect();
-
-        // Margens para a colisão ser mais justa (ignora bordas transparentes das imagens)
-        const charX = charRect.width * 0.2;
-        const charY = charRect.height * 0.1;
-        const pipeX = pipeRect.width * 0.1;
-        const pipeY = pipeRect.height * 0.1;
-
-        const collided =
-            charRect.right - charX > pipeRect.left + pipeX &&
-            charRect.left + charX < pipeRect.right - pipeX &&
-            charRect.bottom - charY > pipeRect.top + pipeY &&
-            charRect.top + charY < pipeRect.bottom - pipeY;
-
-        if (collided) {
-            triggerGameOver();
-        }
-    }
-
-    // Finaliza a rodada
-    function triggerGameOver() {
-        if (!isPlaying) return;
-
-        isPlaying = false;
-
-        clearInterval(gameLoop);
-        clearInterval(scoreLoop);
-
-        // Congela as animações no lugar (cano, nuvens e personagem)
-        gameBoard.classList.remove('running');
-        gameBoard.classList.add('game-over');
-
-        // Troca para a imagem de Game Over
-        personagem.src = currentCharacter.gameOver;
-
-        gameoverTitle.textContent = 'GAME OVER';
-        finalScoreBox.classList.remove('hidden');
-        finalScoreValue.textContent = score;
-        saveStatusMsg.textContent = 'Salvando pontuação no banco...';
-        saveStatusMsg.style.color = '#ffcc00';
-
-        // Pequena pausa para o jogador ver onde bateu
-        setTimeout(() => {
-            gameoverModal.classList.add('active');
-        }, 600);
-
-        saveScore(currentPlayer, score);
-    }
-
-    // Faz a requisição e devolve o JSON, com mensagens de erro claras
-    async function requestJson(url, options) {
-        let response;
-
-        try {
-            response = await fetch(url, options);
-        } catch (err) {
-            throw new Error(
-                'Sem conexão com o servidor. Abra o jogo pelo endereço do Laragon ' +
-                '(ex: http://localhost/sua-pasta/index.php) e não pelo arquivo direto.'
-            );
-        }
-
-        const text = await response.text();
-        let data = null;
-
-        try {
-            data = JSON.parse(text);
-        } catch (err) {
-            data = null;
-        }
-
-        if (!response.ok || !data) {
-            const detail = data && data.message
-                ? data.message
-                : text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
-
-            throw new Error('HTTP ' + response.status + ' em ' + url + (detail ? ': ' + detail : ''));
-        }
-
-        return data;
-    }
-
-    // Mostra uma mensagem dentro da tabela de ranking
-    function showRankingMessage(message, isError = false) {
-        if (!rankingBody) return;
-
-        rankingBody.innerHTML = '';
-
-        const tr = document.createElement('tr');
-        const td = document.createElement('td');
-        td.colSpan = 3;
-        td.className = 'loading-cell';
-        td.textContent = message;
-
-        if (isError) {
-            td.style.color = '#ef4444';
-        }
-
-        tr.appendChild(td);
-        rankingBody.appendChild(tr);
-    }
-
-    // Salva a pontuação no MySQL
-    async function saveScore(playerName, finalScore) {
-        try {
-            const data = await requestJson('salvar_ranking.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    nome: playerName,
-                    pontos: finalScore
-                })
+    function carregarRanking() {
+        return fetch('obter_ranking.php', { cache: 'no-store' })
+            .then(lerJson)
+            .then(function (dados) {
+                if (dados.status !== 'success') throw new Error(dados.message || 'erro');
+                marcarServidor(true);
+                renderRanking(dados.ranking);
+                return true;
+            })
+            .catch(function () {
+                marcarServidor(false);
+                return false;
             });
-
-            if (data.status !== 'success') {
-                throw new Error(data.message || 'Erro ao registrar pontuação.');
-            }
-
-            saveStatusMsg.textContent = 'Pontuação registrada no banco!';
-            saveStatusMsg.style.color = '#10b981';
-
-            if (data.ranking) {
-                renderRanking(data.ranking, playerName, finalScore);
-            } else {
-                fetchRanking();
-            }
-        } catch (error) {
-            console.error('Erro ao salvar pontuação:', error);
-
-            saveStatusMsg.textContent = 'Não foi possível salvar. ' + error.message;
-            saveStatusMsg.style.color = '#ef4444';
-
-            // Tenta mostrar o ranking mesmo assim
-            fetchRanking();
-        }
     }
 
-    // Busca o ranking atualizado
-    async function fetchRanking() {
-        showRankingMessage('Carregando ranking...');
-
-        try {
-            const data = await requestJson('obter_ranking.php?t=' + Date.now());
-
-            if (data.status !== 'success' || !data.ranking) {
-                throw new Error(data.message || 'Resposta inválida do servidor.');
-            }
-
-            renderRanking(data.ranking);
-        } catch (error) {
-            console.error('Erro ao buscar ranking:', error);
-            showRankingMessage('Não foi possível carregar o ranking. ' + error.message, true);
-        }
+    function definirStatusSalvar(texto, tipo) {
+        el.saveMsg.textContent = texto;
+        el.saveMsg.className = 'save-status' + (tipo ? ' ' + tipo : '');
     }
 
-    // Mostra as pontuações na tabela
-    function renderRanking(list, highlightName = null, highlightScore = null) {
-        if (!rankingBody) return;
+    function salvarPontuacao(partida) {
+        if (partida.salvando || partida.salvo) return;
+        partida.salvando = true;
+        el.btnRetry.hidden = true;
+        definirStatusSalvar('Salvando pontuação...', '');
 
-        rankingBody.innerHTML = '';
+        fetch('salvar_ranking.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nome: partida.nome, pontos: partida.pontos })
+        })
+            .then(function (resp) {
+                return lerJson(resp).then(function (dados) {
+                    if (!resp.ok || dados.status !== 'success') {
+                        throw new Error(dados.message || ('erro ' + resp.status));
+                    }
+                    return dados;
+                });
+            })
+            .then(function (dados) {
+                partida.salvo = true;
+                marcarServidor(true);
+                renderRanking(dados.ranking, dados.id);
 
-        if (!list || list.length === 0) {
-            rankingBody.innerHTML =
-                '<tr><td colspan="3" class="loading-cell">' +
-                'Nenhuma pontuação gravada ainda. Jogue para ser o 1º!' +
-                '</td></tr>';
-            return;
-        }
+                if (run !== partida) return;   // jogador já começou outra partida
+                definirStatusSalvar('Pontuação salva no ranking!', 'ok');
 
-        let highlighted = false;
-
-        list.forEach((item, index) => {
-            const tr = document.createElement('tr');
-
-            if (
-                !highlighted &&
-                highlightName &&
-                item.nome === highlightName &&
-                Number(item.pontos) === Number(highlightScore)
-            ) {
-                tr.classList.add('highlight-current');
-                highlighted = true;
-            }
-
-            let medal = `${index + 1}º`;
-
-            if (index === 0) medal = '🥇 1º';
-            else if (index === 1) medal = '🥈 2º';
-            else if (index === 2) medal = '🥉 3º';
-
-            const tdPosition = document.createElement('td');
-            tdPosition.className = 'ranking-pos';
-            tdPosition.textContent = medal;
-
-            const tdName = document.createElement('td');
-            const strong = document.createElement('strong');
-            strong.textContent = item.nome || 'Jogador';
-            tdName.appendChild(strong);
-
-            const tdScore = document.createElement('td');
-            tdScore.textContent = `${Number(item.pontos) || 0} pts`;
-
-            tr.appendChild(tdPosition);
-            tr.appendChild(tdName);
-            tr.appendChild(tdScore);
-
-            rankingBody.appendChild(tr);
-        });
+                var pos = -1;
+                (dados.ranking || []).forEach(function (r, i) {
+                    if (Number(r.id) === Number(dados.id)) pos = i;
+                });
+                if (partida.pontos > 0 && pos === 0) {
+                    el.overTitle.textContent = 'NOVO RECORDE! 🎉';
+                    el.overTitle.classList.add('vitoria');
+                } else if (partida.pontos > 0 && pos > 0) {
+                    el.overTitle.textContent = 'VOCÊ ENTROU NO TOP 10!';
+                    el.overTitle.classList.add('vitoria');
+                }
+            })
+            .catch(function (err) {
+                if (partida.salvo) { console.error(err); return; }   // salvou, mas falhou ao desenhar
+                marcarServidor(false);
+                if (run !== partida) return;
+                definirStatusSalvar('Não foi possível salvar: ' + err.message, 'erro');
+                el.btnRetry.hidden = false;
+            })
+            .then(function () { partida.salvando = false; });
     }
 
-    // Monta o seletor e mostra o personagem escolhido no tabuleiro
-    renderCharacterPicker();
-    personagem.src = currentCharacter.img;
+    /* ---------------------------------------------------------
+       TELAS (modais)
+       --------------------------------------------------------- */
+    function abrirModal(m)  { m.classList.add('active'); }
+    function fecharModal(m) { m.classList.remove('active'); }
 
-    // Iniciar jogo
-    startForm.addEventListener('submit', event => {
-        event.preventDefault();
+    // 'fim' = tela de Game Over | 'ranking' = só a tabela, aberta pelo menu
+    function configurarModalFinal(modo) {
+        var soRanking = (modo === 'ranking');
+        el.scoreBox.hidden   = soRanking;
+        el.btnRestart.hidden = soRanking;
+        el.btnTrocar.hidden  = soRanking;
+        el.btnVoltar.hidden  = !soRanking;
+        el.overTitle.classList.remove('vitoria');
+        if (soRanking) el.overTitle.textContent = 'RANKING';
+    }
 
-        const nameValue = playerInput.value.trim();
+    function mostrarMenu() {
+        estado = 'menu';
+        limparEntidades();
+        el.personagem.style.transform = '';
+        trocarSprite('1');
+        el.container.classList.add('parado');
+        fecharModal(el.overModal);
+        abrirModal(el.startModal);
+        el.inputNome.focus();
+    }
 
-        if (!nameValue) {
-            playerInput.focus();
-            return;
-        }
+    /* ---------------------------------------------------------
+       PARTIDA
+       --------------------------------------------------------- */
+    function limparEntidades() {
+        var itens = el.board.querySelectorAll('.pipe, .moeda, .ponto-flutuante');
+        for (var i = 0; i < itens.length; i++) itens[i].remove();
+    }
 
-        currentPlayer = nameValue;
-        localStorage.setItem('nucles_jump_player', currentPlayer);
+    function novaPartida() {
+        return {
+            nome: jogador.nome,
+            y: 0, vy: 0, noChao: true, buffer: 0,
+            pontos: 0, moedas: 0,
+            tempo: 0, velocidade: CFG.velInicial, distancia: 0,
+            animT: 0,
+            proxSpawn: 0, padroes: 0,
+            canos: [], moedasLista: [],
+            ultimo: 0, raf: 0,
+            salvando: false, salvo: false
+        };
+    }
 
-        startModal.classList.remove('active');
-        startGame();
-    });
+    function atualizarHud() {
+        el.hudPontos.textContent = run.pontos;
+        el.hudMoedas.textContent = run.moedas;
+    }
 
-    // Ver ranking (sem jogar)
-    btnViewRanking.addEventListener('click', () => {
-        fetchRanking();
+    function iniciar(nome, personagem) {
+        if (run && run.raf) cancelAnimationFrame(run.raf);
 
-        gameoverTitle.textContent = 'RANKING';
-        finalScoreBox.classList.add('hidden');
-        saveStatusMsg.textContent = '';
+        jogador.nome = nome;
+        jogador.personagem = PERSONAGENS[personagem] ? personagem : PERSONAGEM_PADRAO;
+        guardar('nj_nome', jogador.nome);
+        guardar('nj_personagem', jogador.personagem);
 
-        startModal.classList.remove('active');
-        gameoverModal.classList.add('active');
-    });
+        el.hudNome.textContent = jogador.nome;
+        limparEntidades();
+        run = novaPartida();
+        atualizarHud();
+        trocarSprite('1');
 
-    // Jogar novamente
-    btnRestart.addEventListener('click', () => {
-        gameoverModal.classList.remove('active');
+        el.jumpTip.classList.remove('oculta');
+        fecharModal(el.startModal);
+        fecharModal(el.overModal);
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
 
-        if (!currentPlayer) {
-            startModal.classList.add('active');
-            playerInput.focus();
+        el.container.classList.remove('parado');
+        estado = 'jogando';
+        run.raf = requestAnimationFrame(loop);
+    }
+
+    function pular() {
+        if (estado !== 'jogando') return;
+        el.jumpTip.classList.add('oculta');
+        if (run.noChao) {
+            run.vy = CFG.impulsoPulo;
+            run.noChao = false;
         } else {
-            startGame();
+            run.buffer = CFG.bufferPulo;
         }
-    });
+    }
 
-    // Trocar jogador
-    btnChangePlayer.addEventListener('click', () => {
-        clearInterval(gameLoop);
-        clearInterval(scoreLoop);
+    /* ---------- Criação de obstáculos e moedas ---------- */
+    function criarCano(x) {
+        var img = document.createElement('img');
+        img.src = imagem('assets/pipe.png');
+        img.className = 'pipe';
+        img.alt = '';
+        img.draggable = false;
+        el.board.appendChild(img);
+        run.canos.push({ el: img, x: x, passou: false });
+    }
 
-        isPlaying = false;
-        currentPlayer = '';
+    function criarMoeda(x, y) {
+        var box = document.createElement('div');
+        box.className = 'moeda';
+        var img = document.createElement('img');
+        img.src = imagem('assets/moeda.png');
+        img.alt = '';
+        img.draggable = false;
+        box.appendChild(img);
+        el.board.appendChild(box);
+        run.moedasLista.push({ el: box, x: x, y: y, coletada: false, tColeta: 0 });
+    }
 
-        gameoverModal.classList.remove('active');
+    // Cada "padrão" posiciona obstáculo/moedas a partir de x0 e devolve a largura ocupada
+    function padraoCanoComArco(x0) {
+        criarCano(x0);
+        var centro = x0 + CFG.pipeW / 2;
+        var t = CFG.moedaTam;
+        // arco de 3 moedas logo acima do cano: recompensa quem pula na hora certa
+        criarMoeda(centro - 52 - t / 2, 112);
+        criarMoeda(centro - t / 2,      142);
+        criarMoeda(centro + 52 - t / 2, 112);
+        return CFG.pipeW + 60;
+    }
 
-        resetElements();
+    function padraoFileiraNoChao(x0) {
+        for (var i = 0; i < 4; i++) criarMoeda(x0 + i * 48, 8);
+        return 4 * 48;
+    }
 
-        hudPlayerName.textContent = '---';
-        scoreDisplay.textContent = '0';
+    function padraoArcoAlto(x0) {
+        var alturas = [16, 70, 96, 70, 16];
+        for (var i = 0; i < alturas.length; i++) criarMoeda(x0 + i * 52, alturas[i]);
+        return alturas.length * 52;
+    }
 
-        startModal.classList.add('active');
-        playerInput.value = '';
-        playerInput.focus();
-    });
+    function gerarPadrao() {
+        var x0 = el.board.clientWidth + 40;
+        var sorteio = Math.random();
+        var largura;
 
-    // Controles do teclado
-    document.addEventListener('keydown', event => {
-        if (event.code === 'Space' || event.code === 'ArrowUp') {
-            if (isPlaying) {
-                event.preventDefault();
-                jump();
+        if (run.padroes === 0 || sorteio < 0.6) largura = padraoCanoComArco(x0);
+        else if (sorteio < 0.8)                 largura = padraoFileiraNoChao(x0);
+        else                                    largura = padraoArcoAlto(x0);
+
+        run.padroes++;
+        // distância até o próximo padrão cresce com a velocidade (tempo de reação constante)
+        run.proxSpawn = largura + run.velocidade * aleatorio(1.25, 1.9);
+    }
+
+    /* ---------- Colisões ---------- */
+    function colide(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x &&
+               a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function caixaPlayer() {
+        return {
+            x: CFG.playerX + CFG.hitPlayerLado,
+            y: run.y + CFG.hitPlayerBaixo,
+            w: CFG.playerW - CFG.hitPlayerLado * 2,
+            h: CFG.playerH - CFG.hitPlayerBaixo - CFG.hitPlayerCima
+        };
+    }
+
+    function caixaCano(c) {
+        return {
+            x: c.x + CFG.hitPipeLado,
+            y: 0,
+            w: CFG.pipeW - CFG.hitPipeLado * 2,
+            h: CFG.pipeH - CFG.hitPipeTopo
+        };
+    }
+
+    function caixaMoeda(m) {
+        return {
+            x: m.x + CFG.hitMoedaMargem,
+            y: m.y + CFG.hitMoedaMargem,
+            w: CFG.moedaTam - CFG.hitMoedaMargem * 2,
+            h: CFG.moedaTam - CFG.hitMoedaMargem * 2
+        };
+    }
+
+    function pontoFlutuante(x, y, texto) {
+        var s = document.createElement('span');
+        s.className = 'ponto-flutuante';
+        s.textContent = texto;
+        s.style.left = x + 'px';
+        s.style.marginBottom = y + 'px';
+        el.board.appendChild(s);
+        setTimeout(function () { s.remove(); }, 750);
+    }
+
+    function coletarMoeda(m) {
+        if (m.coletada) return;      // garante que a moeda só conta uma vez
+        m.coletada = true;
+        m.el.classList.add('coletada');
+        run.moedas += 1;
+        run.pontos += CFG.pontosMoeda;
+        pontoFlutuante(m.x, m.y, '+' + CFG.pontosMoeda);
+        atualizarHud();
+    }
+
+    /* ---------- Atualização por quadro ---------- */
+    function atualizar(dt) {
+        var i;
+
+        run.tempo += dt;
+
+        // CÁLCULO DA VELOCIDADE: aumenta gradualmente com o TEMPO + BÔNUS MODERADO DE MOEDAS
+        run.velocidade = Math.min(
+            CFG.velMaxima, 
+            CFG.velInicial + (CFG.velAceleracao * run.tempo) + (run.moedas * CFG.velBonusMoeda)
+        );
+
+        var dx = run.velocidade * dt;
+        run.distancia += dx;
+
+        // Física do pulo
+        if (!run.noChao) {
+            run.vy -= CFG.gravidade * dt;
+            run.y += run.vy * dt;
+            if (run.y <= 0) {
+                run.y = 0;
+                run.vy = 0;
+                run.noChao = true;
+                if (run.buffer > 0) {          // pulo apertado um instante antes de pousar
+                    run.vy = CFG.impulsoPulo;
+                    run.noChao = false;
+                }
             }
         }
-    });
+        if (run.buffer > 0) run.buffer -= dt;
 
-    // Permite pular clicando/tocando no tabuleiro
-    gameBoard.addEventListener('click', () => {
-        if (isPlaying) {
-            jump();
+        // Novos obstáculos / moedas
+        run.proxSpawn -= dx;
+        if (run.proxSpawn <= 0) gerarPadrao();
+
+        // Movimento do mundo
+        for (i = 0; i < run.canos.length; i++) run.canos[i].x -= dx;
+        for (i = 0; i < run.moedasLista.length; i++) run.moedasLista[i].x -= dx;
+
+        // Obstáculos: pontua ao passar, detecta batida
+        var player = caixaPlayer();
+        for (i = 0; i < run.canos.length; i++) {
+            var c = run.canos[i];
+            if (!c.passou && c.x + CFG.pipeW < CFG.playerX) {
+                c.passou = true;
+                run.pontos += CFG.pontosObstaculo;
+                atualizarHud();
+            }
+            if (colide(player, caixaCano(c))) {
+                fimDeJogo();
+                return;
+            }
+        }
+
+        // Moedas
+        for (i = 0; i < run.moedasLista.length; i++) {
+            var m = run.moedasLista[i];
+            if (m.coletada) {
+                m.tColeta += dt;
+            } else if (colide(player, caixaMoeda(m))) {
+                coletarMoeda(m);
+            }
+        }
+
+        // Remove o que saiu da tela (ou moedas já coletadas há 0,35 s)
+        run.canos = run.canos.filter(function (c) {
+            if (c.x < -CFG.pipeW - 20) { c.el.remove(); return false; }
+            return true;
+        });
+        run.moedasLista = run.moedasLista.filter(function (m) {
+            if (m.x < -CFG.moedaTam - 20 || (m.coletada && m.tColeta > 0.35)) {
+                m.el.remove();
+                return false;
+            }
+            return true;
+        });
+
+        // Animação do personagem
+        run.animT += dt;
+        if (!run.noChao) trocarSprite('pulo');
+        else trocarSprite(Math.floor(run.animT / 0.12) % 2 === 0 ? '1' : '2');
+    }
+
+    function desenhar() {
+        var i;
+        el.personagem.style.transform = 'translate3d(0,' + (-run.y).toFixed(1) + 'px,0)';
+        for (i = 0; i < run.canos.length; i++) {
+            run.canos[i].el.style.transform = 'translate3d(' + run.canos[i].x.toFixed(1) + 'px,0,0)';
+        }
+        for (i = 0; i < run.moedasLista.length; i++) {
+            var m = run.moedasLista[i];
+            m.el.style.transform = 'translate3d(' + m.x.toFixed(1) + 'px,' + (-m.y) + 'px,0)';
+        }
+        el.chao.style.backgroundPositionX = (-(run.distancia % 96)).toFixed(1) + 'px';
+    }
+
+    function loop(agora) {
+        if (estado !== 'jogando') return;
+        if (!run.ultimo) run.ultimo = agora;
+        var dt = Math.min((agora - run.ultimo) / 1000, 0.033);
+        run.ultimo = agora;
+
+        atualizar(dt);
+        if (estado !== 'jogando') return;      // bateu neste quadro
+        desenhar();
+        run.raf = requestAnimationFrame(loop);
+    }
+
+    /* ---------- Fim de jogo ---------- */
+    function fimDeJogo() {
+        estado = 'fim';
+        cancelAnimationFrame(run.raf);
+        el.container.classList.add('parado');
+        desenhar();
+
+        var partida = run;
+        el.finalPontos.textContent = partida.pontos;
+        el.finalMoedas.textContent = partida.moedas;
+        configurarModalFinal('fim');
+        el.overTitle.textContent = 'GAME OVER';
+        el.btnRetry.hidden = true;
+        definirStatusSalvar('Salvando pontuação...', '');
+        salvarPontuacao(partida);
+
+        // pequena pausa para o jogador ver onde bateu
+        setTimeout(function () {
+            if (run !== partida || estado !== 'fim') return;
+            abrirModal(el.overModal);
+            setTimeout(function () {
+                if (run === partida && estado === 'fim') el.btnRestart.focus();
+            }, 600);
+        }, 450);
+    }
+
+    /* ---------------------------------------------------------
+       EVENTOS
+       --------------------------------------------------------- */
+    // Teclado: ESPAÇO, seta para cima ou W
+    document.addEventListener('keydown', function (e) {
+        if (estado !== 'jogando') return;
+        if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+            e.preventDefault();                 // impede rolar a página
+            if (!e.repeat) pular();
         }
     });
 
-    // Avisos de imagem não encontrada
-    personagem.addEventListener('error', () => {
-        console.error(
-            'Não foi possível carregar a imagem do personagem. ' +
-            'Confira o nome e a pasta das imagens na lista PERSONAGENS (pasta assets/).'
-        );
+    // Mouse / toque no cenário
+    el.board.addEventListener('pointerdown', function (e) {
+        if (estado !== 'jogando') return;
+        e.preventDefault();
+        pular();
     });
 
-});
+    // Escolha de personagem: mostra a selecionada no cenário
+    el.picker.addEventListener('change', function (e) {
+        if (e.target && e.target.name === 'personagem' && PERSONAGENS[e.target.value]) {
+            jogador.personagem = e.target.value;
+            trocarSprite('1');
+        }
+    });
+
+    // INICIAR JOGO
+    el.startForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var nome = el.inputNome.value.trim();
+        if (!nome) {
+            el.inputNome.value = '';
+            el.inputNome.reportValidity();
+            return;
+        }
+        var marcado = el.startForm.querySelector('input[name="personagem"]:checked');
+        iniciar(nome, marcado ? marcado.value : PERSONAGEM_PADRAO);
+    });
+
+    // VER RANKING (a partir do menu)
+    el.btnVerRank.addEventListener('click', function () {
+        configurarModalFinal('ranking');
+        fecharModal(el.startModal);
+        abrirModal(el.overModal);
+        carregarRanking();
+    });
+
+    el.btnVoltar.addEventListener('click', mostrarMenu);
+
+    // JOGAR NOVAMENTE (mesmo jogador e personagem)
+    el.btnRestart.addEventListener('click', function () {
+        iniciar(jogador.nome, jogador.personagem);
+    });
+
+    // TROCAR JOGADOR (volta ao menu)
+    el.btnTrocar.addEventListener('click', mostrarMenu);
+
+    // Tentar salvar de novo após uma falha
+    el.btnRetry.addEventListener('click', function () {
+        if (run && estado === 'fim') salvarPontuacao(run);
+    });
+
+    /* ---------------------------------------------------------
+       INICIALIZAÇÃO
+       --------------------------------------------------------- */
+    (function init() {
+        // Troca as imagens do HTML pelas embutidas (evita imagem quebrada / só o texto "alt")
+        var imgs = document.querySelectorAll('img[src^="assets/"]');
+        for (var k = 0; k < imgs.length; k++) {
+            imgs[k].src = imagem(imgs[k].getAttribute('src'));
+        }
+        el.chao.style.backgroundImage = 'url("' + imagem('assets/chao.png') + '")';
+        var icone = document.querySelector('link[rel="icon"]');
+        if (icone) icone.href = imagem('assets/moeda.png');
+
+        var nomeSalvo = ler('nj_nome');
+        if (nomeSalvo) el.inputNome.value = nomeSalvo.slice(0, 30);
+
+        var persSalvo = ler('nj_personagem');
+        if (!PERSONAGENS[persSalvo]) persSalvo = PERSONAGEM_PADRAO;
+        var radio = el.startForm.querySelector('input[name="personagem"][value="' + persSalvo + '"]');
+        if (radio) radio.checked = true;
+        jogador.personagem = persSalvo;
+        trocarSprite('1');
+
+        el.container.classList.add('parado');   // nuvens paradas até começar
+        carregarRanking();                      // atualiza a bolinha de status e a tabela
+    })();
+})();
